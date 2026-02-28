@@ -9,6 +9,8 @@ from datetime import datetime, timezone,timedelta
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 
+from scipy.optimize import newton
+
 
 # ================================================================
 # Constants
@@ -16,7 +18,8 @@ import cartopy.feature as cfeature
 mu = 398600.4418          # km^3/s^2
 omega_earth = 7.2921159e-5
 Re = 6378.137             # km
-c = 299792.458            # km/s
+c_m_s = 299792458.0  #m/s
+c_km_s = c_m_s/1e3
 epoch0=datetime(2000,1,1,21,0,0,tzinfo=timezone.utc)
 
 epoch_current=datetime(2026,2,27,12,0,0, tzinfo=timezone.utc)+ timedelta(seconds=18527)
@@ -27,9 +30,14 @@ v2state=(epoch_current,7600,0.08,35,60,10,(45,-90),1e9,2.4)
 # ================================================================
 # Satellite state
 # ================================================================
+def rotate_to_ECR_using_GMST(epoch):
+    JD = 2451545.0 + (epoch - epoch0).total_seconds()/86400
+    GMST = np.deg2rad((280.46061837 + 360.98564736629*(JD-2451545.0)) % 360)
+    R3_gmst = np.array([[ np.cos(GMST), np.sin(GMST),0],
+                        [-np.sin(GMST), np.cos(GMST),0],
+                        [0,0,1]])
+    return R3_gmst
 
-from scipy.optimize import newton
-import numpy as np
 
 def build_vehicle_state(epoch,r_perigee, e, i_deg, RAAN_deg, arg_perigee_deg, target_latlon, tuner_freq, dish_size):
     # --- Orbital parameters ---
@@ -72,12 +80,8 @@ def build_vehicle_state(epoch,r_perigee, e, i_deg, RAAN_deg, arg_perigee_deg, ta
     r_eci = Q @ r_pf
     v_eci = Q @ v_pf
 
-    # --- Rotate to ECR using GMST ---
-    JD = 2451545.0 + (epoch - epoch0).total_seconds()/86400
-    GMST = np.deg2rad((280.46061837 + 360.98564736629*(JD-2451545.0)) % 360)
-    R3_gmst = np.array([[ np.cos(GMST), np.sin(GMST),0],
-                        [-np.sin(GMST), np.cos(GMST),0],
-                        [0,0,1]])
+
+    R3_gmst=rotate_to_ECR_using_GMST(epoch)
     r_ecr = R3_gmst @ r_eci
     v_ecr = R3_gmst @ (v_eci - np.cross([0,0,omega_earth], r_eci))
 
@@ -108,11 +112,7 @@ def compute_orbit_path_3d(epoch,r_perigee, e, i_deg, RAAN_deg, arg_perigee_deg, 
     Q = R3_W @ R1_i @ R3_w
     r_eci = Q @ r_pf
 
-    JD = 2451545.0 + (epoch - epoch0).total_seconds()/86400
-    GMST = np.deg2rad((280.46061837 + 360.98564736629*(JD-2451545.0)) % 360)
-    R3_gmst = np.array([[ np.cos(GMST), np.sin(GMST),0],
-                        [-np.sin(GMST), np.cos(GMST),0],
-                        [0,0,1]])
+    R3_gmst=rotate_to_ECR_using_GMST(epoch)
     return R3_gmst @ r_eci
 
 # ================================================================
@@ -137,7 +137,7 @@ def compute_ground_track(epoch,r_perigee,e,i_deg,RAAN_deg,arg_perigee_deg,loc,Fc
 #  FOV cone oriented toward target
 # ================================================================
 def fov_circle_target(vehicle, num_points=100):
-    c_m_s = 299792458.0
+
     r_sat = vehicle['r_ecr']
     target_lat, target_lon = vehicle['target_location']
     lat_rad = np.deg2rad(target_lat)
@@ -205,8 +205,8 @@ vehicle2 = build_vehicle_state(*v2temp)
 
 
 
-orbit1_path = compute_orbit_path_3d(*v1state)
-orbit2_path = compute_orbit_path_3d(*v2state)
+orbit1_path = compute_orbit_path_3d(*v1temp)
+orbit2_path = compute_orbit_path_3d(*v2temp)
 
 # ================================================================
 # 3D orbit plot
@@ -236,7 +236,15 @@ ax.set_ylabel('Y (km)')
 ax.set_zlabel('Z (km)')
 ax.set_title('3D Orbits')
 ax.legend()
+
+ax.set_proj_type('ortho')
+
+max_val = 9000
+ax.set_xlim(-max_val, max_val)
+ax.set_ylim(-max_val, max_val)
+ax.set_zlim(-max_val, max_val)
 ax.set_box_aspect([1,1,1])
+
 
 # ================================================================
 #  TDOA, TDOA-dot, TDOA-dot-dot
@@ -260,8 +268,8 @@ r_earth_grid[...,2] = Re*np.sin(LAT_rad)
 # Nadir points
 nadir1 = ecr_to_latlon(vehicle1['r_ecr'])
 nadir2 = ecr_to_latlon(vehicle2['r_ecr'])
-plt.scatter(nadir1[1],nadir1[0],color='blue',s=100,marker='o',label='Vehicle 1 Nadir')
-plt.scatter(nadir2[1],nadir2[0],color='red',s=100,marker='o',label='Vehicle 2 Nadir')
+#plt.scatter(nadir1[1],nadir1[0],color='blue',s=100,marker='o',label='Vehicle 1 Nadir')
+#plt.scatter(nadir2[1],nadir2[0],color='red',s=100,marker='o',label='Vehicle 2 Nadir')
 
 # Ground tracks
 gt_lat1,gt_lon1 = compute_ground_track(*v1state)
@@ -271,7 +279,6 @@ lat_fov1, lon_fov1 = fov_circle_target(vehicle1)
 lat_fov2, lon_fov2 = fov_circle_target(vehicle2)
 mask1 = ~np.isnan(lat_fov1)
 mask2 = ~np.isnan(lat_fov2)
-
 
 # Flatten grids for vectorized computations
 r_flat = r_earth_grid.reshape(-1,3)
@@ -285,43 +292,67 @@ dist1 = np.linalg.norm(vec1, axis=1)
 dist2 = np.linalg.norm(vec2, axis=1)
 
 # --- TDOA ---
-TDOA_flat = (dist1 - dist2)/c*1e3
+TDOA_flat = (dist1 - dist2)/c_km_s *1e3
 sc0 = axes[0].scatter(LON_flat, LAT_flat, c=TDOA_flat, cmap='RdBu', s=10, edgecolors='none', transform=ccrs.PlateCarree())
 axes[0].set_title('TDOA (ms)')
 axes[0].add_feature(cfeature.LAND, facecolor='lightgray')
 axes[0].add_feature(cfeature.OCEAN, facecolor='lightblue')
 axes[0].add_feature(cfeature.COASTLINE)
 axes[0].gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
-plt.colorbar(sc0, ax=axes[0], label='TDOA (ms)')
+plt.colorbar(sc0, ax=axes[0])
 
 
 # --- TDOA-dot ---
 TDOAdot_flat = (np.einsum('ij,j->i', vec1, vehicle1['v_ecr'])/dist1 -
-                np.einsum('ij,j->i', vec2, vehicle2['v_ecr'])/dist2) / c*1e6
+                np.einsum('ij,j->i', vec2, vehicle2['v_ecr'])/dist2) / c_km_s*1e6
 sc1 = axes[1].scatter(LON_flat, LAT_flat, c=TDOAdot_flat, cmap='RdBu', s=10, edgecolors='none', transform=ccrs.PlateCarree())
 axes[1].set_title('TDOA-dot (us/s)')
 axes[1].add_feature(cfeature.LAND, facecolor='lightgray')
 axes[1].add_feature(cfeature.OCEAN, facecolor='lightblue')
 axes[1].add_feature(cfeature.COASTLINE)
 axes[1].gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
-plt.colorbar(sc1, ax=axes[1], label='TDOA-dot (us/s)')
+plt.colorbar(sc1, ax=axes[1])
+
+
 
 # --- TDOA-dot-dot ---
+rho1 = dist1
+rho2 = dist2
+
+v1 = vehicle1['v_ecr']
+v2 = vehicle2['v_ecr']
+
 a1 = -mu * vehicle1['r_ecr'] / np.linalg.norm(vehicle1['r_ecr'])**3
 a2 = -mu * vehicle2['r_ecr'] / np.linalg.norm(vehicle2['r_ecr'])**3
-TDOAdd_flat = (
-    (np.einsum('ij,j->i', vec1, a1) + np.sum(vehicle1['v_ecr']**2)) / dist1
-    - (np.einsum('ij,j->i', vec2, a2) + np.sum(vehicle2['v_ecr']**2)) / dist2
-    - (np.einsum('ij,j->i', vec1, vehicle1['v_ecr'])**2) / dist1**3
-    + (np.einsum('ij,j->i', vec2, vehicle2['v_ecr'])**2) / dist2**3
-) / c *1e9
+
+r1_dot_v1 = np.einsum('ij,j->i', vec1, v1)
+r2_dot_v2 = np.einsum('ij,j->i', vec2, v2)
+
+r1_dot_a1 = np.einsum('ij,j->i', vec1, a1)
+r2_dot_a2 = np.einsum('ij,j->i', vec2, a2)
+
+rho1_ddot = (
+    (-r1_dot_a1)/rho1
+    + (np.dot(v1, v1))/rho1
+    - (r1_dot_v1**2)/rho1**3
+)
+
+rho2_ddot = (
+    (-r2_dot_a2)/rho2
+    + (np.dot(v2, v2))/rho2
+    - (r2_dot_v2**2)/rho2**3
+)
+
+TDOAdd_flat = (rho1_ddot - rho2_ddot) / c_km_s * 1e9
+
+
 sc2 = axes[2].scatter(LON_flat, LAT_flat, c=TDOAdd_flat, cmap='RdBu', s=10, edgecolors='none', transform=ccrs.PlateCarree())
 axes[2].set_title('TDOA-dot-dot (ns/s²)')
 axes[2].add_feature(cfeature.LAND, facecolor='lightgray')
 axes[2].add_feature(cfeature.OCEAN, facecolor='lightblue')
 axes[2].add_feature(cfeature.COASTLINE)
 axes[2].gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
-plt.colorbar(sc2, ax=axes[2], label='TDOA-dot-dot (ns/s²)')
+plt.colorbar(sc2, ax=axes[2])
 
 # --- Overlays for all subplots ---
 for ax in axes:
